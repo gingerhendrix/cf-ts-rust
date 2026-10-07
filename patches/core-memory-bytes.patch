@@ -1,0 +1,12 @@
+--- core.orig.js	2026-10-07 14:25:45.526124281 +0100
++++ core.js	2026-10-07 14:25:49.158331366 +0100
+@@ -240,7 +240,8 @@
+                 const len = exports.ts_output_len();
+                 diagnostics = len ? JSON.parse(decoder.decode(u8().subarray(ptr, ptr + len))) : [];
+             }
+-            return { exitCode, diagnostics };
++            // PoC patch: report the linear memory size after the run.
++            return { exitCode, diagnostics, memoryBytes: memory.buffer.byteLength };
+         },
+     };
+ }

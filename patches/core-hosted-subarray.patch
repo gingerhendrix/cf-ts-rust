@@ -1,0 +1,31 @@
+--- core.js
++++ core.js
+@@ -115,6 +115,10 @@
+     let stderrText = "";
+     const u8 = () => new Uint8Array(memory.buffer);
+     const dv = () => new DataView(memory.buffer);
++    // PoC patch: hosted Cloudflare Workers throw "Invalid array buffer length" from
++    // Uint8Array.prototype.subarray when the start is past 128 MiB. A view made with
++    // the constructor works at any offset, so use it instead of u8().subarray().
++    const view = (ptr, len) => new Uint8Array(memory.buffer, ptr, len);
+ 
+     const envBytes = Object.entries(env).map(([k, v]) => encoder.encode(`${k}=${v}\0`));
+     const writeStrings = (list, ptrs, buf) => {
+@@ -152,7 +156,7 @@
+         },
+         random_get: (buf, len) => {
+             for (let at = 0; at < len; at += 65536) {
+-                crypto.getRandomValues(u8().subarray(buf + at, buf + Math.min(len, at + 65536)));
++                crypto.getRandomValues(view(buf + at, Math.min(len - at, 65536)));
+             }
+             return SUCCESS;
+         },
+@@ -238,7 +242,7 @@
+             if (diagnosticsJson) {
+                 const ptr = exports.ts_output();
+                 const len = exports.ts_output_len();
+-                diagnostics = len ? JSON.parse(decoder.decode(u8().subarray(ptr, ptr + len))) : [];
++                diagnostics = len ? JSON.parse(decoder.decode(view(ptr, len))) : [];
+             }
+             // PoC patch: report the linear memory size after the run.
+             return { exitCode, diagnostics, memoryBytes: memory.buffer.byteLength };

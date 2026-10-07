@@ -7,7 +7,7 @@ A Cloudflare Worker that type-checks TypeScript with [ts-rust](https://github.co
 ## How it works
 
 - `src/ts_rust.wasm` is the ts-rust `ts_wasm` crate, built for `wasm32-wasip1` from upstream commit `79d71780` with `patches/ts-rust-wasm-memory-wins.patch` and an 8 MiB shadow stack. See [Memory settings](#memory-settings). Wrangler imports it as a compiled `WebAssembly.Module`, because Workers cannot compile WASM from bytes at runtime.
-- `src/core.js` is a copy of upstream `npm/wasm/core.js` (MIT, T3 Tools Inc.). It has one change: `runTsc` also returns `memoryBytes`. See `patches/core-memory-bytes.patch`.
+- `src/core.js` is a copy of upstream `npm/wasm/core.js` (MIT, T3 Tools Inc.). It has two changes. `runTsc` also returns `memoryBytes` (`patches/core-memory-bytes.patch`). Reads from WASM memory use a `Uint8Array` constructor view in place of `subarray` (`patches/core-hosted-subarray.patch`). On hosted Workers, `subarray` throws "Invalid array buffer length" when the start is past 128 MiB.
 - `src/index.ts` is the Worker. Each check makes a new WASM instance. This is how ts-rust works: one instance runs one `tsc` invocation.
 
 ## Run it
@@ -109,8 +109,8 @@ Measured in October 2026 with local workerd and one deploy to `workers.dev`.
 
 | Limit | Detail |
 |---|---|
-| Memory | Each check uses about 24 MiB or more of linear memory. A 74-file project (zod v4) passes on Cloudflare. A 359-file project (Effect) fails with "exceeded memory limit". |
-| CPU | Hosted: about 200 ms for a small file on a warm isolate, and up to about 850 ms on a cold one. |
+| Memory | Each check uses about 24 MiB or more of linear memory. On Cloudflare, checks up to about 150 MiB pass every time (zod v4, 107 files, 152.8 MiB). At about 250 MiB some checks pass and some fail (fp-ts, 3 of 8). At 257 MiB and above every check fails with "exceeded memory limit". |
+| CPU | Hosted: about 200 ms for a small file on a warm isolate, and up to about 850 ms on a cold one. Popular libraries take 0.2 to 2.4 s of CPU, about 2 to 6 times native `tsc` 7. |
 | Stack | Deep expressions overflow the V8 stack at about 1,600 to 1,800 terms of `1 + 1 + ...`. The Worker returns 500 and the isolate keeps working. |
 | State | No state between checks. Each check parses the lib files again. |
 | Timing | On Cloudflare, `timings.checkMs` reads 0, because `performance.now()` does not advance during synchronous work. Use Workers observability for CPU time. |

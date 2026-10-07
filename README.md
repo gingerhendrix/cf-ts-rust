@@ -6,7 +6,7 @@ A Cloudflare Worker that type-checks TypeScript with [ts-rust](https://github.co
 
 ## How it works
 
-- `src/ts_rust.wasm` is the ts-rust `ts_wasm` crate, built for `wasm32-wasip1` from upstream commit `79d71780`. Wrangler imports it as a compiled `WebAssembly.Module`, because Workers cannot compile WASM from bytes at runtime.
+- `src/ts_rust.wasm` is the ts-rust `ts_wasm` crate, built for `wasm32-wasip1` from upstream commit `79d71780` with `patches/ts-rust-wasm-memory-wins.patch` and an 8 MiB shadow stack. See [Memory settings](#memory-settings). Wrangler imports it as a compiled `WebAssembly.Module`, because Workers cannot compile WASM from bytes at runtime.
 - `src/core.js` is a copy of upstream `npm/wasm/core.js` (MIT, T3 Tools Inc.). It has one change: `runTsc` also returns `memoryBytes`. See `patches/core-memory-bytes.patch`.
 - `src/index.ts` is the Worker. Each check makes a new WASM instance. This is how ts-rust works: one instance runs one `tsc` invocation.
 
@@ -45,7 +45,7 @@ Other options:
 |---|---|
 | `GET /` | Usage text, and whether the runtime has JSPI (`WebAssembly.promising`) |
 | `?mode=async` | Uses `runTscAsync` (JSPI) instead of `runTsc`. It gives no extra stack depth on Workers. |
-| `"args": [...]` | Your own `tsc` arguments. Default: `-p /app --noEmit`. |
+| `"args": [...]` | Your own `tsc` arguments. Default: `-p /app --noEmit --checkers 1`. |
 
 ## Test it
 
@@ -74,12 +74,34 @@ The committed module works as it is. To rebuild it, you need Rust with the `wasm
 
 ```bash
 git clone https://github.com/pingdotgg/ts-rust /path/to/ts-rust
+git -C /path/to/ts-rust checkout 79d71780
+git -C /path/to/ts-rust am "$PWD/patches/ts-rust-wasm-memory-wins.patch"
 TS_RUST_DIR=/path/to/ts-rust bun run build:wasm
 ```
 
 Set `TOOLS_DIR` to use a rustup and binaryen kept outside the system path. Set `WASM_OPT=none` to skip `wasm-opt`. The build takes about 2 to 3 minutes on a 24-core machine.
 
-`patches/ts_wasm-stack-8mib.patch` cuts the WASM shadow stack from 32 MiB to 8 MiB. That saves 24 MiB of memory for each check. It is not applied to the committed module.
+The build script sets `TS_WASM_STACK_SIZE=8388608` unless you set it yourself. Without the patch, ts-rust ignores this setting and uses a 32 MiB stack.
+
+## Memory settings
+
+Two settings lower the memory of each check. The Worker uses both.
+
+| Setting | Where | Effect |
+|---|---|---|
+| `--checkers 1` | Default `tsc` args in `src/index.ts` | tsgo makes 4 checkers. On one WASM thread they only split the files, and each one loads the lib types again. One checker gives the same diagnostics with less memory and time. If you send your own `args`, add `--checkers 1` yourself. |
+| 8 MiB shadow stack | Build setting from the patch | Upstream uses 32 MiB. The smaller stack saves 24 MiB for each check. Deep expressions still stop at the same depth, because the V8 stack overflows first. |
+
+`patches/ts-rust-wasm-memory-wins.patch` holds three commits on `79d71780`. The first adds the `TS_WASM_STACK_SIZE` build setting. The second packs the `dom` and `webworker` libs in a separate stream, so a check without `dom` does not unpack them. The third adds notes to the upstream docs.
+
+Linear memory after one check, in MiB:
+
+| Input | Before | Now |
+|---|---:|---:|
+| One file, lib es2022 | 55.9 | 24.3 |
+| One file, lib dom | 67.4 | 43.4 |
+| zod v4, 74 files | 134.9 | 88.9 |
+| Effect 3.16, 359 files | 572.3 | 460.8 |
 
 ## Known limits
 
@@ -87,7 +109,7 @@ Measured in October 2026 with local workerd and one deploy to `workers.dev`.
 
 | Limit | Detail |
 |---|---|
-| Memory | Each check uses 55 MiB or more of linear memory. A 74-file project (zod v4) passes on Cloudflare. A 359-file project (Effect) fails with "exceeded memory limit". |
+| Memory | Each check uses about 24 MiB or more of linear memory. A 74-file project (zod v4) passes on Cloudflare. A 359-file project (Effect) fails with "exceeded memory limit". |
 | CPU | Hosted: about 200 ms for a small file on a warm isolate, and up to about 850 ms on a cold one. |
 | Stack | Deep expressions overflow the V8 stack at about 1,600 to 1,800 terms of `1 + 1 + ...`. The Worker returns 500 and the isolate keeps working. |
 | State | No state between checks. Each check parses the lib files again. |
@@ -98,4 +120,4 @@ Measured in October 2026 with local workerd and one deploy to `workers.dev`.
 
 The code in this repository is under the [WTFPL](https://www.wtfpl.net/), version 2. See [`LICENSE`](LICENSE).
 
-The WTFPL does not apply to the ts-rust code. This includes the ts-rust lines that the files in `patches/` contain. `src/ts_rust.wasm` and `src/core.js` come from [ts-rust](https://github.com/pingdotgg/ts-rust) at commit `79d71780`. ts-rust is MIT licensed (T3 Tools Inc.). The WASM module also contains code and lib files from TypeScript (Apache 2.0) and Go (BSD 3-Clause). The upstream license and notice files are in [`third_party/ts-rust/`](third_party/ts-rust/).
+The WTFPL does not apply to the ts-rust code. This includes the ts-rust lines that the files in `patches/` contain. `src/ts_rust.wasm` and `src/core.js` come from [ts-rust](https://github.com/pingdotgg/ts-rust) at commit `79d71780`. The module also has the changes in `patches/ts-rust-wasm-memory-wins.patch`. ts-rust is MIT licensed (T3 Tools Inc.). The WASM module also contains code and lib files from TypeScript (Apache 2.0) and Go (BSD 3-Clause). The upstream license and notice files are in [`third_party/ts-rust/`](third_party/ts-rust/).

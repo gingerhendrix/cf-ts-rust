@@ -1,0 +1,314 @@
+From bb16aaf43af58911c1e9d55cd26cbb5363917104 Mon Sep 17 00:00:00 2001
+From: Gareth Andrew <gingerhendrix@gmail.com>
+Date: Wed, 7 Oct 2026 16:34:51 +0100
+Subject: [PATCH 1/3] wasm: set the shadow stack size with TS_WASM_STACK_SIZE
+
+---
+ crates/ts_wasm/build.rs | 27 ++++++++++++++++++++++++---
+ scripts/wasm/build.sh   |  3 +++
+ 2 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/crates/ts_wasm/build.rs b/crates/ts_wasm/build.rs
+index 345c091c..87d1418e 100644
+--- a/crates/ts_wasm/build.rs
++++ b/crates/ts_wasm/build.rs
+@@ -1,14 +1,35 @@
+ //! Link settings of the wasm module. They are here, not in RUSTFLAGS, so
+ //! every build of the module gets them (scripts/run-cargo-capped.sh sets
+ //! RUSTFLAGS, which replaces target rustflags).
++//!
++//! env: TS_WASM_STACK_SIZE  the shadow stack in bytes (default 32 MiB)
++
++/// The default shadow stack: 32 MiB.
++const DEFAULT_STACK_SIZE: u64 = 32 << 20;
+ 
+ fn main() {
++    println!("cargo:rerun-if-env-changed=TS_WASM_STACK_SIZE");
+     if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
+-        // The shadow stack in linear memory: 32 MiB. Native runs the
+-        // checker on threads with 16 MiB to 1 GiB of stack
++        // The shadow stack in linear memory: 32 MiB by default. Native runs
++        // the checker on threads with 16 MiB to 1 GiB of stack
+         // (gostd/stack.rs); the wasm shadow stack holds only the locals
+         // whose address is taken, so it needs less. The stack is first in
+         // memory, so an overflow traps and does not corrupt data.
+-        println!("cargo:rustc-cdylib-link-arg=-zstack-size=33554432");
++        // Every instance pays for the whole stack. A host with a memory cap
++        // (a Cloudflare Worker) can set TS_WASM_STACK_SIZE=8388608 and save
++        // 24 MiB of each instance. With 8 MiB, `1 + 1 + ...` reached the
++        // same depth as with 32 MiB: about 1,700 terms in workerd, where
++        // V8's native stack overflows first, and 34,000 in npm/wasm
++        // node.js (a 256 MB worker stack). The default stays 32 MiB until
++        // a wider corpus shows that less is enough.
++        let size = std::env::var("TS_WASM_STACK_SIZE").map_or(DEFAULT_STACK_SIZE, |size| {
++            size.parse()
++                .expect("TS_WASM_STACK_SIZE is a number of bytes")
++        });
++        assert!(
++            size >= 1 << 20 && size % 16 == 0,
++            "TS_WASM_STACK_SIZE is at least 1 MiB and a multiple of 16"
++        );
++        println!("cargo:rustc-cdylib-link-arg=-zstack-size={size}");
+     }
+ }
+diff --git a/scripts/wasm/build.sh b/scripts/wasm/build.sh
+index f3cf7227..c6c9ec7e 100755
+--- a/scripts/wasm/build.sh
++++ b/scripts/wasm/build.sh
+@@ -8,6 +8,9 @@
+ #        WASM_RUSTFLAGS  added to RUSTFLAGS (default none)
+ #        WASM_OPT        wasm-opt flags (default "--flatten --rereloop -Oz -Oz");
+ #                        "none" skips wasm-opt and the function order
++#        TS_WASM_STACK_SIZE  the shadow stack in bytes (default 33554432, 32 MiB;
++#                        crates/ts_wasm/build.rs). 8388608 saves 24 MiB of each
++#                        instance where the engine stack is small (Workers, browsers)
+ # needs: rustup target add wasm32-wasip1; wasm-opt (binaryen 132 or later);
+ #        node
+ #
+-- 
+2.55.0
+
+
+From 9431595fa9ac3500e6d407c7d45a1f3744fe0e86 Mon Sep 17 00:00:00 2001
+From: Gareth Andrew <gingerhendrix@gmail.com>
+Date: Wed, 7 Oct 2026 16:34:52 +0100
+Subject: [PATCH 2/3] wasm: pack the dom and webworker libs in a stream of
+ their own
+
+---
+ crates/ts_goport/parts/goport_util/build.rs   | 58 ++++++++++++-----
+ .../ts_goport/src/frontend/bundled/embed.rs   | 64 ++++++++++++-------
+ 2 files changed, 83 insertions(+), 39 deletions(-)
+
+diff --git a/crates/ts_goport/parts/goport_util/build.rs b/crates/ts_goport/parts/goport_util/build.rs
+index 0ad6b29b..b7ac9556 100644
+--- a/crates/ts_goport/parts/goport_util/build.rs
++++ b/crates/ts_goport/parts/goport_util/build.rs
+@@ -1,11 +1,13 @@
+ //! The wasm build packs the bundled libs and the diagnostic message texts.
+ //! For a wasm target, this writes:
+-//! - the `crates/ts_goport/libs/lib.*.d.ts` files (not with `noembed`) as one
+-//!   LZMA stream to `OUT_DIR/libs.lzma`, and their paths and sizes in stream
+-//!   order to `OUT_DIR/libs.rs`. `src/frontend/bundled/embed.rs` unpacks the
+-//!   stream up to the last lib that a run reads. One stream is 0.31 MB, where
+-//!   one stream per lib was 0.48 MB: lib.webworker.d.ts repeats much of
+-//!   lib.dom.d.ts.
++//! - the `crates/ts_goport/libs/lib.*.d.ts` files (not with `noembed`) as two
++//!   LZMA streams to `OUT_DIR/libs-0.lzma` and `OUT_DIR/libs-1.lzma`, and
++//!   their paths, sizes and streams in stream order to `OUT_DIR/libs.rs`.
++//!   `src/frontend/bundled/embed.rs` unpacks a stream up to the last lib that
++//!   a run reads from it. Stream 0 has the libs that do not describe the web
++//!   (0.65 MB of text, a 1 MiB window); stream 1 has the dom and webworker
++//!   libs (3.1 MB, a 4 MiB window), so lib.webworker.d.ts still shares a
++//!   stream with lib.dom.d.ts, whose text it repeats.
+ //! - the texts of `src/diagnostics/catalog.rs`, in catalog order and ended
+ //!   by NUL, as one LZMA stream to `OUT_DIR/diagnostic_texts.lzma`.
+ //!   `src/diagnostics/mod.rs` unpacks it on the first text read: 44 KB, not
+@@ -32,9 +34,12 @@ fn main() {
+     pack_libs();
+ }
+ 
+-/// Packs the libs into one stream. The webworker libs come last, so a run
+-/// that reads none of them (most do not) unpacks 3.0 of the 3.79 MB. Most
+-/// programs read lib.dom.d.ts and nearly all the other libs.
++/// Packs the libs into two streams (see the crate comment). A run that
++/// reads no dom or webworker lib (`"lib": ["es2022"]`) unpacks only stream
++/// 0: 0.65 MB of text and a 1 MiB window, where one stream in name order
++/// unpacked lib.dom.d.ts (2.35 MB) too and kept a 4 MiB window. In stream 1
++/// the webworker libs come last, so a run that reads lib.dom.d.ts and none
++/// of them (most do not) unpacks 2.35 of the 3.1 MB.
+ fn pack_libs() {
+     let libs = PathBuf::from(env("CARGO_MANIFEST_DIR")).join("../../libs");
+     println!("cargo:rerun-if-changed={}", libs.display());
+@@ -44,22 +49,41 @@ fn pack_libs() {
+         .filter_map(|name| name.into_string().ok())
+         .filter(|name| name.starts_with("lib.") && name.ends_with(".d.ts"))
+         .collect();
+-    let webworker = |name: &str| {
+-        name.starts_with("lib.webworker.") && name != "lib.webworker.importscripts.d.ts"
++    // 0: not web, 1: dom, 2: webworker. Groups 1 and 2 share stream 1.
++    let group = |name: &str| {
++        if name.starts_with("lib.dom.") {
++            1
++        } else if name.starts_with("lib.webworker.") && name != "lib.webworker.importscripts.d.ts" {
++            2
++        } else {
++            0
++        }
+     };
+-    names.sort_by(|a, b| (webworker(a), a).cmp(&(webworker(b), b)));
+-    let mut texts = Vec::new();
+-    let mut index = String::from("static PACKED_LIBS: &[(&str, usize)] = &[\n");
++    names.sort_by(|a, b| (group(a), a).cmp(&(group(b), b)));
++    let mut texts = [Vec::new(), Vec::new()];
++    let mut index = String::from("static PACKED_LIBS: &[(&str, usize, usize)] = &[\n");
+     for name in &names {
+         let path = libs.join(name);
+         println!("cargo:rerun-if-changed={}", path.display());
+         let text = std::fs::read(path).expect("read a lib");
+-        writeln!(index, "    (\"libs/{name}\", {}),", text.len()).expect("write to a String");
+-        texts.extend_from_slice(&text);
++        let stream = usize::from(group(name) > 0);
++        writeln!(index, "    (\"libs/{name}\", {}, {stream}),", text.len())
++            .expect("write to a String");
++        texts[stream].extend_from_slice(&text);
+     }
+     index.push_str("];\n");
++    index.push_str("static PACKED_STREAMS: [&[u8]; 2] = [\n");
+     let out = PathBuf::from(env("OUT_DIR"));
+-    std::fs::write(out.join("libs.lzma"), pack(&texts)).expect("write the libs");
++    for (stream, text) in texts.iter().enumerate() {
++        let file = format!("libs-{stream}.lzma");
++        std::fs::write(out.join(&file), pack(text)).expect("write the libs");
++        writeln!(
++            index,
++            "    include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{file}\")),"
++        )
++        .expect("write to a String");
++    }
++    index.push_str("];\n");
+     std::fs::write(out.join("libs.rs"), index).expect("write the lib index");
+ }
+ 
+diff --git a/crates/ts_goport/src/frontend/bundled/embed.rs b/crates/ts_goport/src/frontend/bundled/embed.rs
+index 875cc262..472cfca2 100644
+--- a/crates/ts_goport/src/frontend/bundled/embed.rs
++++ b/crates/ts_goport/src/frontend/bundled/embed.rs
+@@ -6,10 +6,9 @@
+ //! lib texts come from `crates/ts_goport/libs`, a copy of the pinned
+ //! `internal/bundled/libs` (see its PROVENANCE.md).
+ //!
+-//! PORT: the wasm build embeds the libs packed (one LZMA stream, 0.31 MB in
+-//! place of 3.79 MB; see `parts/goport_util/build.rs`) and unpacks the
+-//! stream up to each lib on its first read. The names and texts do not
+-//! change.
++//! PORT: the wasm build embeds the libs packed (two LZMA streams in place of
++//! 3.79 MB; see `parts/goport_util/build.rs`) and unpacks a stream up to each
++//! lib on its first read. The names and texts do not change.
+ 
+ #[cfg(not(target_family = "wasm"))]
+ use super::{SNAPSHOT_TEXT_MIN, const_hash};
+@@ -267,39 +266,59 @@ fn embedded_contents(rest: &str) -> Option<&'static str> {
+ }
+ 
+ // Go: embed_generated.go:238 embeddedContents
+-// PORT: wasm unpacks the one stream of build.rs (`libs.lzma`, the libs in
+-// `PACKED_LIBS` order) up to lib `rest`, and keeps each text it unpacks for
+-// the life of the process. The reader stays too, with its 3.8 MB window
+-// (one stream per lib needed at most 2.35 MB, for lib.dom.d.ts, at a time).
++// PORT: wasm unpacks the stream of lib `rest` (`PACKED_STREAMS`, from
++// build.rs; the libs of each stream in `PACKED_LIBS` order) up to that lib,
++// and keeps each text it unpacks for the life of the process. A stream's
++// reader stays while the stream has libs left, with its window: 1 MiB for
++// stream 0, 4 MiB for stream 1 (dom and webworker). A run that reads no
++// lib of stream 1 never makes its reader. When the last lib of a stream is
++// out, its reader drops, so the allocator can reuse the window.
+ #[cfg(target_family = "wasm")]
+ fn embedded_contents(rest: &str) -> Option<&'static str> {
+     use std::io::Read;
+     use std::sync::{Mutex, PoisonError};
++    /// One stream of `PACKED_STREAMS`: its reader, from the first read of
++    /// the stream until its last lib is out, and the texts it unpacked.
+     struct Unpacked {
+-        reader: lzma_rust2::LzmaReader<&'static [u8]>,
++        reader: Option<lzma_rust2::LzmaReader<&'static [u8]>>,
+         texts: Vec<&'static str>,
+     }
+-    static UNPACKED: Mutex<Option<Unpacked>> = Mutex::new(None);
++    static UNPACKED: Mutex<Vec<Unpacked>> = Mutex::new(Vec::new());
+     let index = packed_lib_index(rest)?;
++    let stream = PACKED_LIBS[index].2;
++    // The libs of `stream`, which are next to each other in `PACKED_LIBS`.
++    let first = PACKED_LIBS
++        .iter()
++        .position(|&(_, _, s)| s == stream)
++        .expect("lib `rest` is in its stream");
++    let count = PACKED_LIBS.iter().filter(|&&(_, _, s)| s == stream).count();
+     let mut unpacked = UNPACKED.lock().unwrap_or_else(PoisonError::into_inner);
+-    let unpacked = unpacked.get_or_insert_with(|| {
+-        let packed: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libs.lzma"));
+-        Unpacked {
+-            reader: lzma_rust2::LzmaReader::new_mem_limit(packed, u32::MAX, None)
+-                .expect("build.rs packs the libs"),
++    if unpacked.is_empty() {
++        unpacked.extend(PACKED_STREAMS.iter().map(|_| Unpacked {
++            reader: None,
+             texts: Vec::new(),
+-        }
+-    });
+-    while unpacked.texts.len() <= index {
+-        let mut text = vec![0; PACKED_LIBS[unpacked.texts.len()].1];
++        }));
++    }
++    let unpacked = &mut unpacked[stream];
++    while unpacked.texts.len() <= index - first {
++        let mut text = vec![0; PACKED_LIBS[first + unpacked.texts.len()].1];
++        // The reader (and its window) is made on the first read of the
++        // stream. A stream whose libs are all out never reads again.
+         unpacked
+             .reader
++            .get_or_insert_with(|| {
++                lzma_rust2::LzmaReader::new_mem_limit(PACKED_STREAMS[stream], u32::MAX, None)
++                    .expect("build.rs packs the libs")
++            })
+             .read_exact(&mut text)
+             .expect("build.rs packs the libs");
+         let text = String::from_utf8(text).expect("a lib is UTF-8");
+         unpacked.texts.push(Box::leak(text.into_boxed_str()));
++        if unpacked.texts.len() == count {
++            unpacked.reader = None;
++        }
+     }
+-    Some(unpacked.texts[index])
++    Some(unpacked.texts[index - first])
+ }
+ 
+ /// The size of lib `rest` (`embedded_contents`) in bytes.
+@@ -321,11 +340,12 @@ fn packed_lib_index(rest: &str) -> Option<usize> {
+     if !EMBEDDED_CONTENTS.contains(&rest) {
+         return None;
+     }
+-    let index = PACKED_LIBS.iter().position(|&(path, _)| path == rest);
++    let index = PACKED_LIBS.iter().position(|&(path, _, _)| path == rest);
+     Some(index.expect("build.rs packs each bundled lib"))
+ }
+ 
+-// wasm: `PACKED_LIBS`, the path and size of each lib in `libs.lzma` order.
++// wasm: `PACKED_LIBS`, the path, size and stream of each lib in stream order,
++// and `PACKED_STREAMS`, the packed streams.
+ #[cfg(target_family = "wasm")]
+ include!(concat!(env!("OUT_DIR"), "/libs.rs"));
+ 
+-- 
+2.55.0
+
+
+From fdd530ad4473d1131dd58220ece8b5237fd4adfe Mon Sep 17 00:00:00 2001
+From: Gareth Andrew <gingerhendrix@gmail.com>
+Date: Wed, 7 Oct 2026 16:34:52 +0100
+Subject: [PATCH 3/3] docs(wasm): memory notes for hosts with a memory cap
+
+---
+ npm/wasm/README.md | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/npm/wasm/README.md b/npm/wasm/README.md
+index bd8c8ded..63bff7f5 100644
+--- a/npm/wasm/README.md
++++ b/npm/wasm/README.md
+@@ -78,6 +78,12 @@ To try the example, run `python3 -m http.server -d npm/wasm` and open
+   checker keeps its own node and symbol ids, as a native checker thread does.
+ - Each run uses a new instance of the compiled module, because the compiler keeps one program per
+   process. The module is compiled once. Memory goes back when a run ends.
++- Memory: an instance starts at 37 MiB, of which 32 MiB is the shadow stack. A host with a memory
++  cap (a Cloudflare Worker has 128 MB) can build with `TS_WASM_STACK_SIZE=8388608`
++  (`scripts/wasm/build.sh`), which saves 24 MiB, and pass `--checkers 1`. The default is 4
++  checkers, as in tsgo, and on one thread they only split the files: one checker resolves the
++  lib types once, not 4 times (zod v4: 113 MiB, not 135 MiB, and 20% faster). On Effect 3.16
++  (230 diagnostics) the two gave the same diagnostics in the same order.
+ - The checker recurses deeply, so very deep nesting can run out of stack. Node runs each call in a
+   worker thread with a 256 MB stack (about 30,000 terms of `1 + 1 + ...`). Bun ignores that
+   setting, so under Bun a call runs on the calling thread. In a browser worker, `tsc` runs through
+-- 
+2.55.0
+

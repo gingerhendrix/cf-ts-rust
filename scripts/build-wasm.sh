@@ -4,6 +4,8 @@
 #   TS_RUST_DIR  ts-rust checkout (required), for example a clone of pingdotgg/ts-rust
 #   TOOLS_DIR    optional folder with rustup/, cargo/ and binaryen-*/bin (a toolchain kept outside the system)
 #   WASM_OPT     set to "none" to skip wasm-opt (faster build, larger module)
+#   TS_WASM_STACK_SIZE  shadow stack in bytes (default here 8388608, 8 MiB). Needs
+#                patches/ts-rust-wasm-memory-wins.patch; upstream ignores it and uses 32 MiB.
 #
 # Needs Rust with the wasm32-wasip1 target and binaryen wasm-opt 132 or later on PATH.
 set -euo pipefail
@@ -20,6 +22,7 @@ fi
 
 # CI=1 makes the upstream script call plain cargo instead of its capped wrapper.
 export CI=1
+export TS_WASM_STACK_SIZE="${TS_WASM_STACK_SIZE:-8388608}"
 cd "$TS_RUST_DIR"
 echo "building from $(git rev-parse --short HEAD 2>/dev/null || echo unknown) into $out"
 scripts/wasm/build.sh "$out"

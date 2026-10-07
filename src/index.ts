@@ -17,6 +17,10 @@ const DEFAULT_TSCONFIG = JSON.stringify({
   },
 });
 
+// One checker: on one WASM thread, more checkers only split the files, and each one
+// resolves the lib types again. Diagnostics are the same; memory and time are lower.
+const DEFAULT_ARGS = ["-p", "/app", "--noEmit", "--checkers", "1"];
+
 let checksInIsolate = 0;
 
 function toFiles(body: CheckRequest): Record<string, string> {
@@ -49,7 +53,7 @@ export default {
     let stderr = "";
     const decoder = new TextDecoder();
     const options = {
-      args: body.args ?? ["-p", "/app", "--noEmit"],
+      args: body.args ?? DEFAULT_ARGS,
       cwd: "/app",
       fs: memoryFileSystem(files),
       diagnosticsJson: true,

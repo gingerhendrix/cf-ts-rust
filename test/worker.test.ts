@@ -52,6 +52,13 @@ describe("POST { source }", () => {
     assert.deepEqual(json.diagnostics[0].startPosition, { line: 0, character: 13 });
   });
 
+  test("small check uses the 8 MiB stack build and one checker", async () => {
+    // Upstream module with 4 checkers: about 56 MiB. This build with --checkers 1: about 24 MiB.
+    const { json } = await check({ source: 'export const n: number = "one";\n' });
+    assert.equal(json.exitCode, 2);
+    assert.ok(json.memory.linearMiB < 32, `linear memory ${json.memory.linearMiB} MiB`);
+  });
+
   test("async mode gives the same result", async () => {
     const { json } = await check({ source: 'export const n: number = "one";\n' }, "async");
     assert.equal(json.timings.mode, "async");

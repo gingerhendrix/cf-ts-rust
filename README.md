@@ -83,7 +83,7 @@ Set `TOOLS_DIR` to use a rustup and binaryen kept outside the system path. Set `
 
 ## Known limits
 
-Measured in October 2026. Full results are in the StreamOS stream `2026-10-07/i-would-like-to-try-a-proof`.
+Measured in October 2026 with local workerd and one deploy to `workers.dev`.
 
 | Limit | Detail |
 |---|---|
@@ -93,3 +93,9 @@ Measured in October 2026. Full results are in the StreamOS stream `2026-10-07/i-
 | State | No state between checks. Each check parses the lib files again. |
 | Timing | On Cloudflare, `timings.checkMs` reads 0, because `performance.now()` does not advance during synchronous work. Use Workers observability for CPU time. |
 | API | Diagnostics only. No quick info, no language service. |
+
+## Licenses
+
+`src/ts_rust.wasm` and `src/core.js` come from [ts-rust](https://github.com/pingdotgg/ts-rust) at commit `79d71780`. ts-rust is MIT licensed (T3 Tools Inc.). The WASM module also contains code and lib files from TypeScript (Apache 2.0) and Go (BSD 3-Clause). The upstream license and notice files are in [`third_party/ts-rust/`](third_party/ts-rust/).
+
+The rest of this repository has no license yet.

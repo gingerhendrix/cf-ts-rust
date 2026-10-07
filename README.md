@@ -96,6 +96,6 @@ Measured in October 2026 with local workerd and one deploy to `workers.dev`.
 
 ## Licenses
 
-`src/ts_rust.wasm` and `src/core.js` come from [ts-rust](https://github.com/pingdotgg/ts-rust) at commit `79d71780`. ts-rust is MIT licensed (T3 Tools Inc.). The WASM module also contains code and lib files from TypeScript (Apache 2.0) and Go (BSD 3-Clause). The upstream license and notice files are in [`third_party/ts-rust/`](third_party/ts-rust/).
+The code in this repository is under the [WTFPL](https://www.wtfpl.net/), version 2. See [`LICENSE`](LICENSE).
 
-The rest of this repository has no license yet.
+The WTFPL does not apply to the ts-rust code. This includes the ts-rust lines that the files in `patches/` contain. `src/ts_rust.wasm` and `src/core.js` come from [ts-rust](https://github.com/pingdotgg/ts-rust) at commit `79d71780`. ts-rust is MIT licensed (T3 Tools Inc.). The WASM module also contains code and lib files from TypeScript (Apache 2.0) and Go (BSD 3-Clause). The upstream license and notice files are in [`third_party/ts-rust/`](third_party/ts-rust/).

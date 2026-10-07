@@ -1,6 +1,7 @@
 {
   "name": "cf-ts-rust",
   "private": true,
+  "license": "WTFPL",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --ip 127.0.0.1 --port 8799",
